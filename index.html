@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D Drone Radar Detection</title>
+<style>
+  :root { --bg:#0b1118; --panel:#141c25; --line:#28343f; --text:#e8edf2; --muted:#93a3b3;
+          --accent:#4d8dff; --ok:#2bea8c; --bad:#ff5b5b; --amber:#ffb84d; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg);
+         color: var(--text); display: grid; grid-template-columns: 1fr 360px; }
+  #view { position: relative; min-width: 0; min-height: 0; overflow: hidden; touch-action: none; }
+  #cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  .hint { position: absolute; left: 12px; bottom: 10px; font-size: .8rem; color: var(--muted); pointer-events: none; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); padding: 16px; overflow-y: auto; }
+  h1 { font-size: 1.15rem; margin: 0 0 4px; }
+  h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 8px; font-weight: 600; }
+  .sub { margin: 0 0 12px; color: var(--muted); font-size: .9rem; }
+  #scope { display: block; width: 100%; max-width: 320px; aspect-ratio: 1; margin: 0 auto 12px; border-radius: 50%; }
+  .status { text-align: center; font-weight: 700; letter-spacing: .04em; padding: 10px; border-radius: 8px; }
+  .status.ok  { background: #0f2a1f; color: var(--ok); border: 1px solid #1c5a3d; }
+  .status.bad { background: #351518; color: var(--bad); border: 1px solid #7a2a30; }
+  .reason { margin: 8px 0 12px; font-size: .88rem; color: var(--muted); text-align: center; min-height: 1.3em; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 6px 4px; text-align: center; }
+  .stat b { display: block; font-size: 1rem; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: .7rem; color: var(--muted); }
+  .row { display: flex; gap: 6px; }
+  .row button, .pad button {
+    flex: 1; font: inherit; font-size: .85rem; padding: 8px 6px; border-radius: 8px;
+    border: 1px solid var(--line); background: transparent; color: var(--text); cursor: pointer; user-select: none; touch-action: none;
+  }
+  button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .pad { display: none; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+  .pad.show { display: grid; }
+  .pad button:active { background: var(--accent); }
+  label { display: grid; gap: 4px; font-size: .9rem; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .note { margin-top: 14px; font-size: .82rem; color: var(--muted); line-height: 1.55; }
+  .note i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  @media (max-width: 800px) {
+    body { grid-template-columns: 1fr; grid-template-rows: 52vh 1fr; }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+
+<div id="view">
+  <canvas id="cv"></canvas>
+  <div class="hint">Drag to rotate · Scroll or pinch to zoom</div>
+</div>
+
+<aside>
+  <h1>Drone Radar Detection</h1>
+  <p class="sub">A radar sweeps around. See when it spots the drone.</p>
+
+  <canvas id="scope"></canvas>
+  <div class="status ok" id="status">NOT DETECTED</div>
+  <div class="reason" id="reason"></div>
+
+  <div class="stats">
+    <div class="stat"><b id="rRange">–</b><span>Range</span></div>
+    <div class="stat"><b id="rBear">–</b><span>Bearing</span></div>
+    <div class="stat"><b id="rAlt">–</b><span>Altitude</span></div>
+    <div class="stat"><b id="rHits">0</b><span>Detections</span></div>
+  </div>
+
+  <h3>Flight</h3>
+  <div class="row">
+    <button id="mAuto" aria-pressed="true">Auto flight</button>
+    <button id="mMan" aria-pressed="false">Manual flight</button>
+  </div>
+  <div class="pad" id="pad">
+    <button data-k="left">⟲ Left</button>
+    <button data-k="fwd">▲ Forward</button>
+    <button data-k="right">Right ⟳</button>
+    <button data-k="up">⇧ Up</button>
+    <button data-k="back">▼ Back</button>
+    <button data-k="down">⇩ Down</button>
+  </div>
+  <p class="note" id="keyHint" style="display:none;margin-top:8px">Keys: W/S forward and back, A/D turn, R/F up and down.</p>
+
+  <h3>Drone size</h3>
+  <div class="row" id="sizes">
+    <button data-s="0.6" aria-pressed="false">Small</button>
+    <button data-s="1" aria-pressed="true">Medium</button>
+    <button data-s="1.4" aria-pressed="false">Large</button>
+  </div>
+
+  <h3>Radar range</h3>
+  <label><span id="rangeLabel"></span>
+    <input type="range" id="range" min="8" max="20" step="1" value="14">
+  </label>
+
+  <p class="note">
+    <i style="background:#33ff88"></i>Green wedge: the radar beam.<br>
+    <i style="background:#ffb84d"></i>Amber ring: how far this drone can be detected.<br>
+    <i style="background:#55606d"></i>Grey towers: they hide the drone from the radar.<br>
+    Try a small drone, or fly behind a tower.
+    The drone is drawn larger than real scale.
+  </p>
+</aside>
+
+<script>
+// No libraries: a tiny 3D engine on a 2D canvas.
+(function () {
+  const wrap = document.getElementById("view");
+  const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+  const scope = document.getElementById("scope"), sctx = scope.getContext("2d");
+
+  // ---------- math ----------
+  const Z3 = [0, 0, 0], TAU = Math.PI * 2, M_PER_UNIT = 50;
+  const sub = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+  const add = (a, b) => [a[0]+b[0], a[1]+b[1], a[2]+b[2]];
+  const mul = (a, s) => [a[0]*s, a[1]*s, a[2]*s];
+  const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+  const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+  const norm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0]/l, a[1]/l, a[2]/l]; };
+  const hex = h => [(h >> 16) & 255, (h >> 8) & 255, h & 255];
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const angDiff = (a, b) => ((a - b + Math.PI) % TAU + TAU) % TAU - Math.PI;
+
+  function rot(p, r) {           // X, then Z, then Y
+    let x = p[0], y = p[1], z = p[2], c, s, t;
+    if (r[0]) { c = Math.cos(r[0]); s = Math.sin(r[0]); t = y*c - z*s; z = y*s + z*c; y = t; }
+    if (r[2]) { c = Math.cos(r[2]); s = Math.sin(r[2]); t = x*c - y*s; y = x*s + y*c; x = t; }
+    if (r[1]) { c = Math.cos(r[1]); s = Math.sin(r[1]); t = x*c + z*s; z = -x*s + z*c; x = t; }
+    return [x, y, z];
+  }
+
+  // ---------- geometry ----------
+  const objs = [];
+  let cur = null;
+  function newObj(xf) { const o = { faces: [], xf: xf || null }; objs.push(o); cur = o; return o; }
+  function push(v, color, o) {
+    cur.faces.push({ v: v.map(p => add(rot(p, o.rot || Z3), o.pos || Z3)), color: hex(color),
+      alpha: o.alpha || 1, glow: !!o.glow, spin: o.spin || null });
+  }
+  function box(w, h, d, color, o) {
+    o = o || {};
+    const x = w/2, y = h/2, z = d/2;
+    const c = [[-x,-y,-z],[x,-y,-z],[x,y,-z],[-x,y,-z],[-x,-y,z],[x,-y,z],[x,y,z],[-x,y,z]];
+    [[0,1,2,3],[5,4,7,6],[4,0,3,7],[1,5,6,2],[3,2,6,7],[4,5,1,0]].forEach(q => {
+      const p0 = c[q[0]], u = sub(c[q[1]], p0), v = sub(c[q[3]], p0);
+      const nu = Math.max(1, Math.ceil(Math.hypot(...u) / 0.5)), nv = Math.max(1, Math.ceil(Math.hypot(...v) / 0.5));
+      for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) {
+        const a = add(p0, add(mul(u, i/nu), mul(v, j/nv))), b = add(a, mul(u, 1/nu));
+        push([a, b, add(b, mul(v, 1/nv)), add(a, mul(v, 1/nv))], color, o);
+      }
+    });
+  }
+  function cyl(r, h, color, o, seg) {
+    o = o || {}; seg = seg || 16;
+    const rows = Math.max(1, Math.ceil(h / 1.2)), top = [], bot = [];
+    for (let i = 0; i < seg; i++) {
+      const a = (i / seg) * TAU;
+      top.push([Math.cos(a)*r, h/2, Math.sin(a)*r]);
+      bot.push([Math.cos(a)*r, -h/2, Math.sin(a)*r]);
+    }
+    for (let i = 0; i < seg; i++) {
+      const j = (i + 1) % seg;
+      for (let k = 0; k < rows; k++) {
+        const y0 = -h/2 + h*k/rows, y1 = -h/2 + h*(k+1)/rows;
+        push([[bot[i][0], y0, bot[i][2]], [bot[j][0], y0, bot[j][2]], [bot[j][0], y1, bot[j][2]], [bot[i][0], y1, bot[i][2]]], color, o);
+      }
+    }
+    push(top, color, o);
+    push(bot.slice().reverse(), color, o);
+  }
+  function sphere(r, color, o) {
+    o = o || {};
+    const lat = 4, lon = 6, pt = (i, j) => { const a = i/lat*Math.PI, b = j/lon*TAU;
+      return [r*Math.sin(a)*Math.cos(b), r*Math.cos(a), r*Math.sin(a)*Math.sin(b)]; };
+    for (let i = 0; i < lat; i++) for (let j = 0; j < lon; j++) push([pt(i,j), pt(i+1,j), pt(i+1,j+1), pt(i,j+1)], color, o);
+  }
+
+  // ---------- state ----------
+  const ANT = 2.3;                 // antenna height
+  const BEAM_W = 0.26;             // beam width (radians)
+  const BEAM_SPEED = 1.6;          // radians per second
+  const PERIOD = TAU / BEAM_SPEED;
+  const obstacles = [
+    { x: 8,  z: -5,  r: 1.5, h: 4 },
+    { x: -9, z: 8,   r: 2.0, h: 5.5 },
+    { x: -5, z: -12, r: 1.2, h: 3.2 }
+  ];
+  const S = {
+    mode: "auto", t: 0, pos: [10, 3, 0], heading: 1.5, pitch: 0, bank: 0,
+    beam: 0, radarRange: 14, sizeK: 1,
+    blips: [], pings: [], hits: 0, wasHit: false, lastHit: -99, lastBlip: -99, clock: 0
+  };
+  const keys = new Set();
+
+  // static world: tower + obstacles
+  newObj(null);
+  box(2, 0.3, 2, 0x37424f, { pos: [0, 0.15, 0] });
+  cyl(0.15, 1.5, 0x5d6a78, { pos: [0, 1.05, 0] }, 10);
+  cyl(0.4, 0.2, 0x6b7683, { pos: [0, 1.85, 0] }, 14);
+  obstacles.forEach(o => {
+    cyl(o.r, o.h, 0x55606d, { pos: [o.x, o.h/2, o.z] }, 16);
+  });
+  // rotating dish
+  const dish = newObj(p => rot(p, [0, S.beam, 0]));
+  box(1.8, 0.8, 0.1, 0xaab6c4, { pos: [0, ANT, 0.35] });
+  box(0.3, 0.3, 0.4, 0x6b7683, { pos: [0, ANT, 0.1] });
+  box(0.06, 0.06, 0.4, 0xff5b5b, { pos: [0, ANT + 0.2, 0.6], glow: true });
+  // drone (local coordinates)
+  const drone = newObj(p => add(rot(p, [S.pitch, S.heading, S.bank]), S.pos));
+  const spinners = [];
+  (function () {
+    box(0.5, 0.16, 0.7, 0x2f3742, { pos: [0, 0, 0] });
+    box(0.34, 0.03, 0.34, 0x1f8f4a, { pos: [0, 0.1, 0] });
+    box(0.32, 0.12, 0.5, 0x2c6bd6, { pos: [0, -0.13, 0] });
+    box(0.16, 0.14, 0.14, 0x111111, { pos: [0, -0.02, 0.42] });
+    box(0.04, 0.03, 0.6, 0x3a4048, { pos: [0.25, -0.3, 0] });
+    box(0.04, 0.03, 0.6, 0x3a4048, { pos: [-0.25, -0.3, 0] });
+    box(1.9, 0.06, 0.12, 0x3a4048, { rot: [0, -Math.PI/4, 0] });
+    box(1.9, 0.06, 0.12, 0x3a4048, { rot: [0,  Math.PI/4, 0] });
+    [[1,1],[-1,1],[1,-1],[-1,-1]].forEach(c => {
+      const mx = c[0]*0.67, mz = c[1]*0.67;
+      cyl(0.11, 0.1, 0x7b8594, { pos: [mx, 0.08, mz] }, 10);
+      const sp = { cx: mx, cz: mz, dir: (c[0]*c[1] > 0) ? 1 : -1 };
+      spinners.push(sp);
+      box(0.95, 0.01, 0.09, 0xe1e6ec, { pos: [mx, 0.16, mz], alpha: 0.9, spin: sp });
+      sphere(0.05, c[1] > 0 ? 0x2bea8c : 0xff4d4d, { pos: [mx, 0.0, mz], glow: true });
+    });
+  })();
+  let spinAngle = 0;
+
+  // ---------- camera ----------
+  let theta = 0.6, phi = 1.0, radius = 29;
+  const target = [0, 1.5, 0];
+  const pointers = new Map();
+  let pinchDist = 0;
+  cv.addEventListener("pointerdown", e => {
+    cv.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) { const [a, b] = [...pointers.values()]; pinchDist = Math.hypot(a.x-b.x, a.y-b.y); }
+  });
+  cv.addEventListener("pointermove", e => {
+    if (!pointers.has(e.pointerId)) return;
+    const p = pointers.get(e.pointerId), dx = e.clientX - p.x, dy = e.clientY - p.y;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 1) { theta -= dx * 0.008; phi = clamp(phi - dy * 0.008, 0.2, 1.45); }
+    else if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()], d = Math.hypot(a.x-b.x, a.y-b.y);
+      radius = clamp(radius * pinchDist / d, 10, 60); pinchDist = d;
+    }
+  });
+  const endPtr = e => pointers.delete(e.pointerId);
+  cv.addEventListener("pointerup", endPtr);
+  cv.addEventListener("pointercancel", endPtr);
+  cv.addEventListener("wheel", e => { e.preventDefault(); radius = clamp(radius * (1 + Math.sign(e.deltaY) * 0.08), 10, 60); }, { passive: false });
+
+  // ---------- UI ----------
+  const $ = id => document.getElementById(id);
+  const mAuto = $("mAuto"), mMan = $("mMan"), pad = $("pad"), keyHint = $("keyHint");
+  function setMode(m) {
+    S.mode = m;
+    mAuto.setAttribute("aria-pressed", m === "auto");
+    mMan.setAttribute("aria-pressed", m === "manual");
+    pad.classList.toggle("show", m === "manual");
+    keyHint.style.display = m === "manual" ? "block" : "none";
+    keys.clear();
+    if (m === "auto") S.t = 0;
+  }
+  mAuto.onclick = () => setMode("auto");
+  mMan.onclick = () => setMode("manual");
+
+  document.querySelectorAll("#sizes button").forEach(b => b.onclick = () => {
+    S.sizeK = parseFloat(b.dataset.s);
+    document.querySelectorAll("#sizes button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  });
+  const rangeIn = $("range");
+  function updRange() { S.radarRange = +rangeIn.value; $("rangeLabel").textContent = "Radar range: " + Math.round(S.radarRange * M_PER_UNIT) + " m"; }
+  rangeIn.oninput = updRange; updRange();
+
+  const keyMap = { arrowleft: "left", a: "left", arrowright: "right", d: "right", arrowup: "fwd", w: "fwd",
+                   arrowdown: "back", s: "back", r: "up", f: "down" };
+  addEventListener("keydown", e => {
+    const k = keyMap[e.key.toLowerCase()];
+    if (!k || S.mode !== "manual" || e.target.tagName === "INPUT") return;
+    keys.add(k); e.preventDefault();
+  });
+  addEventListener("keyup", e => { const k = keyMap[e.key.toLowerCase()]; if (k) keys.delete(k); });
+  pad.querySelectorAll("button").forEach(b => {
+    const k = b.dataset.k;
+    b.addEventListener("pointerdown", e => { e.preventDefault(); keys.add(k); });
+    ["pointerup", "pointerleave", "pointercancel"].forEach(ev => b.addEventListener(ev, () => keys.delete(k)));
+  });
+
+  // ---------- simulation ----------
+  const effRange = () => S.radarRange * S.sizeK;
+
+  function blocked(px, py, pz) {
+    for (const o of obstacles) {
+      // segment (0,0)->(px,pz) against circle
+      const dx = px, dz = pz, fx = -o.x, fz = -o.z;
+      const a = dx*dx + dz*dz, b = 2*(fx*dx + fz*dz), c = fx*fx + fz*fz - o.r*o.r;
+      const disc = b*b - 4*a*c;
+      if (a === 0 || disc < 0) continue;
+      const sq = Math.sqrt(disc);
+      const t1 = clamp((-b - sq) / (2*a), 0, 1), t2 = clamp((-b + sq) / (2*a), 0, 1);
+      if ((-b + sq) / (2*a) < 0 || (-b - sq) / (2*a) > 1) continue;
+      const y1 = ANT + (py - ANT) * t1, y2 = ANT + (py - ANT) * t2;
+      if (Math.min(y1, y2) < o.h) return true;
+    }
+    return false;
+  }
+
+  function geometry() {
+    const [x, y, z] = S.pos;
+    const rh = Math.hypot(x, z), slant = Math.hypot(rh, y - ANT);
+    const elev = Math.atan2(y - ANT, Math.max(rh, 1e-6));
+    return { rh, slant, elev, bearing: Math.atan2(x, z), blocked: blocked(x, y, z) };
+  }
+
+  function update(dt) {
+    S.clock += dt;
+    S.beam = (S.beam + BEAM_SPEED * dt) % TAU;
+    spinAngle += dt * 35;
+
+    const prev = S.pos.slice();
+    let yawRate = 0;
+    if (S.mode === "auto") {
+      S.t += dt;
+      const r = 9 + 6 * Math.sin(0.11 * S.t), ph = 0.3 * S.t;
+      const tgt = [r * Math.cos(ph), 3 + 1.6 * Math.sin(0.5 * S.t), r * Math.sin(ph)];
+      const k = Math.min(1, dt * 5);
+      S.pos = [S.pos[0] + (tgt[0]-S.pos[0])*k, S.pos[1] + (tgt[1]-S.pos[1])*k, S.pos[2] + (tgt[2]-S.pos[2])*k];
+      const vx = (S.pos[0]-prev[0]) / dt, vz = (S.pos[2]-prev[2]) / dt, sp = Math.hypot(vx, vz);
+      if (sp > 0.3) {
+        const d = angDiff(Math.atan2(vx, vz), S.heading) * Math.min(1, dt * 5);
+        S.heading += d; yawRate = d / dt;
+      }
+      S.pitch += (0.2 * clamp(sp / 4, 0, 1) - S.pitch) * Math.min(1, dt * 5);
+    } else {
+      const turn = (keys.has("left") ? 1 : 0) - (keys.has("right") ? 1 : 0);
+      const fwd = (keys.has("fwd") ? 5 : 0) - (keys.has("back") ? 2.5 : 0);
+      const climb = (keys.has("up") ? 1 : 0) - (keys.has("down") ? 1 : 0);
+      S.heading += turn * 1.8 * dt; yawRate = turn * 1.8;
+      S.pos = [S.pos[0] + Math.sin(S.heading) * fwd * dt, clamp(S.pos[1] + climb * 2.5 * dt, 0.6, 9), S.pos[2] + Math.cos(S.heading) * fwd * dt];
+      const rr = Math.hypot(S.pos[0], S.pos[2]);
+      if (rr > 22) { S.pos[0] *= 22 / rr; S.pos[2] *= 22 / rr; }
+      S.pitch += (0.2 * clamp(fwd / 4, -1, 1) - S.pitch) * Math.min(1, dt * 5);
+    }
+    S.bank += (clamp(-yawRate * 0.25, -0.45, 0.45) - S.bank) * Math.min(1, dt * 6);
+
+    // radar
+    const g = geometry();
+    const inRange = g.slant <= effRange();
+    const silent = g.elev > 1.22;                 // cone of silence (above ~70°)
+    const covered = inRange && !g.blocked && !silent;
+    const inBeam = Math.abs(angDiff(g.bearing, S.beam)) < BEAM_W / 2;
+    const hit = covered && inBeam;
+    if (hit) {
+      if (!S.wasHit) { S.hits++; S.pings.push({ t0: S.clock, pos: S.pos.slice() }); }
+      S.lastHit = S.clock;
+      if (S.clock - S.lastBlip > 0.07) { S.blips.push({ rh: g.rh, bearing: g.bearing, t: S.clock }); S.lastBlip = S.clock; }
+    }
+    S.wasHit = hit;
+    S.blips = S.blips.filter(b => S.clock - b.t < PERIOD * 1.15);
+    S.pings = S.pings.filter(p => S.clock - p.t0 < 1);
+    S.g = g; S.covered = covered; S.inRange = inRange; S.silent = silent;
+  }
+
+  // ---------- rendering ----------
+  let W = 1, H = 1, dpr = 1, SW = 1;
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.max(1, wrap.clientWidth); H = Math.max(1, wrap.clientHeight);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    SW = Math.max(1, scope.clientWidth);
+    scope.width = Math.round(SW * dpr); scope.height = Math.round(SW * dpr);
+  }
+  addEventListener("resize", resize);
+  new ResizeObserver(resize).observe(wrap);
+  resize();
+
+  const LIGHT = norm([0.4, 0.9, 0.5]);
+
+  function render() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#0b1118"; ctx.fillRect(0, 0, W, H);
+
+    const cp = [target[0] + radius * Math.sin(phi) * Math.sin(theta), target[1] + radius * Math.cos(phi), target[2] + radius * Math.sin(phi) * Math.cos(theta)];
+    const fwd = norm(sub(target, cp)), right = norm(cross(fwd, [0, 1, 0])), up = cross(right, fwd);
+    const f = 1.2 * Math.min(W, H);
+    const proj = p => { const d = sub(p, cp), z = dot(d, fwd); return [W/2 + f*dot(d, right)/z, H/2 - f*dot(d, up)/z, z]; };
+
+    function line3(pts, close) {              // polyline that skips pieces behind the camera
+      let started = false;
+      ctx.beginPath();
+      const n = pts.length + (close ? 1 : 0);
+      for (let i = 0; i < n; i++) {
+        const p = proj(pts[i % pts.length]);
+        if (p[2] < 0.3) { started = false; continue; }
+        if (!started) { ctx.moveTo(p[0], p[1]); started = true; } else ctx.lineTo(p[0], p[1]);
+      }
+      ctx.stroke();
+    }
+    function circle3(cx, y, cz, r, n) {
+      const pts = []; for (let i = 0; i < n; i++) { const a = i / n * TAU; pts.push([cx + r*Math.cos(a), y, cz + r*Math.sin(a)]); }
+      return pts;
+    }
+
+    // ground
+    const gp = circle3(0, 0, 0, 24, 64).map(proj);
+    if (gp.every(p => p[2] > 0.3)) {
+      ctx.fillStyle = "#101a24"; ctx.beginPath();
+      gp.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.lineWidth = 1; ctx.strokeStyle = "#1a2733";
+    for (let k = -24; k <= 24; k += 4) {
+      const a = [], b = [];
+      for (let s = -24; s <= 24; s += 2) { a.push([k, 0, s]); b.push([s, 0, k]); }
+      line3(a); line3(b);
+    }
+    ctx.strokeStyle = "#26394a";
+    for (let r = 5; r <= 20; r += 5) line3(circle3(0, 0.01, 0, r, 72), true);
+    // effective detection ring
+    ctx.strokeStyle = "#ffb84d"; ctx.lineWidth = 2; ctx.setLineDash([8, 6]);
+    line3(circle3(0, 0.02, 0, effRange(), 96), true);
+    ctx.setLineDash([]);
+
+    // drone shadow + altitude line
+    const dp = S.pos;
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    const sh = circle3(dp[0], 0.02, dp[2], 0.8, 16).map(proj);
+    if (sh.every(p => p[2] > 0.3)) { ctx.beginPath(); sh.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.fill(); }
+    ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = 1; ctx.setLineDash([3, 4]);
+    line3([[dp[0], 0, dp[2]], dp]); ctx.setLineDash([]);
+
+    // opaque faces
+    const items = [];
+    for (const o of objs) for (const fc of o.faces) {
+      const world = fc.v.map(p => {
+        let q = p;
+        if (fc.spin) {
+          const a = spinAngle * fc.spin.dir, c = Math.cos(a), s = Math.sin(a), dx = q[0]-fc.spin.cx, dz = q[2]-fc.spin.cz;
+          q = [fc.spin.cx + dx*c + dz*s, q[1], fc.spin.cz - dx*s + dz*c];
+        }
+        return o.xf ? o.xf(q) : q;
+      });
+      const pr = world.map(proj);
+      if (pr.some(p => p[2] < 0.3)) continue;
+      let n = norm(cross(sub(world[1], world[0]), sub(world[2], world[0])));
+      const cen = mul(world.reduce(add), 1 / world.length);
+      if (dot(n, sub(cp, cen)) < 0) n = mul(n, -1);
+      const k = fc.glow ? 1 : 0.35 + 0.65 * Math.max(0, dot(n, LIGHT));
+      items.push({ pr, depth: pr.reduce((s, p) => s + p[2], 0) / pr.length, alpha: fc.alpha,
+        css: "rgb(" + fc.color.map(v => Math.round(Math.min(255, v * k))).join(",") + ")" });
+    }
+    items.sort((a, b) => b.depth - a.depth);
+    for (const it of items) {
+      ctx.globalAlpha = it.alpha; ctx.fillStyle = ctx.strokeStyle = it.css; ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.moveTo(it.pr[0][0], it.pr[0][1]);
+      for (let i = 1; i < it.pr.length; i++) ctx.lineTo(it.pr[i][0], it.pr[i][1]);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // radar beam (translucent, drawn last)
+    const R0 = S.radarRange, HT = 7, N = 6, b0 = S.beam - BEAM_W/2, b1 = S.beam + BEAM_W/2;
+    const arc = (y) => { const pts = []; for (let i = 0; i <= N; i++) { const a = b0 + (b1-b0)*i/N; pts.push([R0*Math.sin(a), y, R0*Math.cos(a)]); } return pts; };
+    const lo = arc(0.03), hi = arc(HT), c0 = [0, 0.03, 0], c1 = [0, HT, 0];
+    const bf = [{ v: [c0, ...lo], a: 0.22 }, { v: [c1, ...hi], a: 0.08 },
+                { v: [c0, lo[0], hi[0], c1], a: 0.16 }, { v: [c0, lo[N], hi[N], c1], a: 0.16 }];
+    for (let i = 0; i < N; i++) bf.push({ v: [lo[i], lo[i+1], hi[i+1], hi[i]], a: 0.13 });
+    const bitems = [];
+    bf.forEach(fc => {
+      const pr = fc.v.map(proj);
+      if (pr.some(p => p[2] < 0.3)) return;
+      bitems.push({ pr, a: fc.a, depth: pr.reduce((s, p) => s + p[2], 0) / pr.length });
+    });
+    bitems.sort((a, b) => b.depth - a.depth);
+    bitems.forEach(it => {
+      ctx.fillStyle = "rgba(51,255,136," + it.a + ")";
+      ctx.beginPath(); it.pr.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill();
+    });
+
+    // detection pings
+    S.pings.forEach(p => {
+      const age = (S.clock - p.t0) / 1;
+      ctx.strokeStyle = "rgba(255,91,91," + (1 - age).toFixed(2) + ")"; ctx.lineWidth = 2.5;
+      line3(circle3(p.pos[0], p.pos[1], p.pos[2], 0.7 + age * 3.5, 40), true);
+    });
+
+    // lock brackets + banner
+    const detected = S.clock - S.lastHit < PERIOD * 1.15;
+    if (detected) {
+      const c = proj(S.pos), s = 30;
+      ctx.strokeStyle = "#ff5b5b"; ctx.lineWidth = 2.5;
+      [[-1,-1],[1,-1],[1,1],[-1,1]].forEach(q => {
+        ctx.beginPath();
+        ctx.moveTo(c[0] + q[0]*s, c[1] + q[1]*(s-10)); ctx.lineTo(c[0] + q[0]*s, c[1] + q[1]*s); ctx.lineTo(c[0] + q[0]*(s-10), c[1] + q[1]*s);
+        ctx.stroke();
+      });
+      ctx.font = "700 14px system-ui, sans-serif";
+      const txt = "DRONE DETECTED", tw = ctx.measureText(txt).width + 24;
+      ctx.fillStyle = "rgba(255,91,91,0.92)"; ctx.fillRect(W/2 - tw/2, 14, tw, 30);
+      ctx.fillStyle = "#fff"; ctx.fillText(txt, W/2 - tw/2 + 12, 34);
+    }
+    return detected;
+  }
+
+  // ---------- radar scope (2D screen) ----------
+  const SCOPE_UNITS = 20;
+  function drawScope() {
+    const s = SW, c = s / 2, R = c - 4, k = R / SCOPE_UNITS;
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    sctx.clearRect(0, 0, s, s);
+    sctx.fillStyle = "#04120a"; sctx.beginPath(); sctx.arc(c, c, R + 3, 0, TAU); sctx.fill();
+    sctx.strokeStyle = "#0f4d2c"; sctx.lineWidth = 1;
+    for (let r = 5; r <= 20; r += 5) { sctx.beginPath(); sctx.arc(c, c, r * k, 0, TAU); sctx.stroke(); }
+    sctx.beginPath(); sctx.moveTo(c - R, c); sctx.lineTo(c + R, c); sctx.moveTo(c, c - R); sctx.lineTo(c, c + R); sctx.stroke();
+    // towers
+    sctx.fillStyle = "#1c2b24";
+    obstacles.forEach(o => { sctx.beginPath(); sctx.arc(c + o.x*k, c - o.z*k, o.r*k, 0, TAU); sctx.fill(); });
+    // detection ring
+    sctx.strokeStyle = "rgba(255,184,77,0.8)"; sctx.setLineDash([4, 4]);
+    sctx.beginPath(); sctx.arc(c, c, Math.min(effRange(), SCOPE_UNITS) * k, 0, TAU); sctx.stroke(); sctx.setLineDash([]);
+    // sweep trail
+    const base = S.beam - Math.PI / 2;
+    for (let i = 0; i < 24; i++) {
+      sctx.fillStyle = "rgba(51,255,136," + (0.20 * (1 - i / 24)).toFixed(3) + ")";
+      sctx.beginPath(); sctx.moveTo(c, c); sctx.arc(c, c, R, base - (i + 1) * 0.045, base - i * 0.045); sctx.closePath(); sctx.fill();
+    }
+    sctx.strokeStyle = "#33ff88"; sctx.lineWidth = 2;
+    sctx.beginPath(); sctx.moveTo(c, c); sctx.lineTo(c + R * Math.cos(base), c + R * Math.sin(base)); sctx.stroke();
+    // blips
+    S.blips.forEach(b => {
+      const age = (S.clock - b.t) / (PERIOD * 1.15), a = Math.max(0, 1 - age);
+      const x = c + b.rh * k * Math.sin(b.bearing), y = c - b.rh * k * Math.cos(b.bearing);
+      sctx.fillStyle = "rgba(255,120,120," + a.toFixed(2) + ")";
+      sctx.beginPath(); sctx.arc(x, y, 4.5, 0, TAU); sctx.fill();
+    });
+    // radar centre
+    sctx.fillStyle = "#33ff88"; sctx.beginPath(); sctx.arc(c, c, 3, 0, TAU); sctx.fill();
+  }
+
+  // ---------- readouts ----------
+  let frame = 0;
+  function readouts(detected) {
+    const st = $("status");
+    st.className = "status " + (detected ? "bad" : "ok");
+    st.textContent = detected ? "⚠ DRONE DETECTED" : "NOT DETECTED";
+    const g = S.g;
+    let why;
+    if (!S.inRange) why = "Too far away for this drone size";
+    else if (g.blocked) why = "Hidden behind a tower";
+    else if (S.silent) why = "Flying above the radar (cone of silence)";
+    else why = detected ? "Radar beam is tracking the drone" : "In range, waiting for the beam to sweep";
+    $("reason").textContent = why;
+    $("rRange").textContent = Math.round(g.slant * M_PER_UNIT) + " m";
+    $("rBear").textContent = Math.round(((g.bearing * 180 / Math.PI) + 360) % 360) + "°";
+    $("rAlt").textContent = Math.round(S.pos[1] * M_PER_UNIT) + " m";
+    $("rHits").textContent = S.hits;
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = clamp((now - last) / 1000, 0.001, 0.05);
+    last = now;
+    update(dt);
+    const detected = render();
+    drawScope();
+    if (frame++ % 4 === 0) readouts(detected);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
